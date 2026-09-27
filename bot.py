@@ -334,6 +334,24 @@ async def admin_delete_callback(callback_query: types.CallbackQuery):
         await callback_query.message.edit_text('⚠️ Bu e\'lon allaqachon o\'chirilgan.')
 
 
+# --- STATISTIKA (faqat admin) ---
+@dp.message_handler(commands=['statistika'])
+async def show_statistics(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer('Sizda bu buyruqdan foydalanish huquqi yo\'q.')
+        return
+    users_count = await get_users_count()
+    ads = await get_all_ads()
+    women_ads = await get_all_women_ads()
+    await message.answer(
+        f"📊 <b>Bot statistikasi:</b>\n\n"
+        f"👥 Jami foydalanuvchilar: {users_count}\n"
+        f"📢 Faol umumiy e'lonlar: {len(ads)}\n"
+        f"🧵 Faol ayollar bo'limi e'lonlari: {len(women_ads)}",
+        parse_mode='HTML'
+    )
+
+
 # --- BARCHA FOYDALANUVCHILARGA XABAR YUBORISH (faqat admin) ---
 @dp.message_handler(commands=['xabar'])
 async def broadcast_start(message: types.Message):
