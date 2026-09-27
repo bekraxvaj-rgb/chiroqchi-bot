@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
 import logging
 import os
+import asyncio
+import aiosqlite
 from aiogram import Bot, Dispatcher, executor, types
 from aiogram.contrib.fsm_storage.memory import MemoryStorage
 from aiogram.dispatcher import FSMContext
@@ -9,6 +11,10 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeybo
 
 API_TOKEN = os.environ.get('API_TOKEN')
 ADMIN_ID = int(os.environ.get('ADMIN_ID', '1151233619'))  # O'zingizning Telegram ID raqamingiz
+
+# Ma'lumotlar bazasi fayli. Render'da Persistent Disk ulangan bo'lsa,
+# DB_PATH environment variable orqali doimiy joyni ko'rsating (masalan /var/data/bot.db)
+DB_PATH = os.environ.get('DB_PATH', 'bot.db')
 
 # Kanal ma'lumotlari (Majburiy obuna uchun)
 CHANNEL_ID = -1003800297556
@@ -19,23 +25,154 @@ bot = Bot(token=API_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(bot, storage=storage)
 
-MASTERS_DB = []
-ADS_DB = []
-WOMEN_ADS_DB = []
-
+# Online holat hozircha xotirada qoladi (bu doimiy saqlanishi shart emas)
 MEN_ONLINE_DB = set()
 WOMEN_ONLINE_DB = set()
 
-# Majburiy obunani tekshiruvchi funksiya
-async def check_sub_channel(user_id):
-    try:
-        member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
-        if member.status in ['creator', 'administrator', 'member']:
-            return True
-        return False
-    except Exception as e:
-        print(f"Obunani tekshirishda xatolik: {e}")
-        return False
+
+# ============== MA'LUMOTLAR BAZASI FUNKSIYALARI ==============
+
+async def init_db():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS ads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                user_name TEXT,
+                text TEXT,
+                phone TEXT
+            )
+        ''')
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS women_ads (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                user_name TEXT,
+                text TEXT,
+                phone TEXT
+            )
+        ''')
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS masters (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                category TEXT,
+                full_name TEXT,
+                phone TEXT,
+                description TEXT
+            )
+        ''')
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                full_name TEXT,
+                username TEXT
+            )
+        ''')
+        await db.commit()
+    logging.info(f"Ma'lumotlar bazasi tayyor: {DB_PATH}")
+
+
+async def register_user(user_id, full_name, username):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO users (user_id, full_name, username) VALUES (?, ?, ?)",
+            (user_id, full_name, username)
+        )
+        await db.commit()
+
+
+async def get_all_user_ids():
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT user_id FROM users")
+        rows = await cursor.fetchall()
+        return [r[0] for r in rows]
+
+
+async def get_users_count():
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT COUNT(*) FROM users")
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
+
+async def add_ad(user_id, user_name, text, phone):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO ads (user_id, user_name, text, phone) VALUES (?, ?, ?, ?)",
+            (user_id, user_name, text, phone)
+        )
+        await db.commit()
+
+
+async def get_all_ads():
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT id, user_id, user_name, text, phone FROM ads")
+        rows = await cursor.fetchall()
+        return [{'id': r[0], 'user_id': r[1], 'user_name': r[2], 'text': r[3], 'phone': r[4]} for r in rows]
+
+
+async def get_user_ads(user_id):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT id, user_id, user_name, text, phone FROM ads WHERE user_id=?", (user_id,))
+        rows = await cursor.fetchall()
+        return [{'id': r[0], 'user_id': r[1], 'user_name': r[2], 'text': r[3], 'phone': r[4]} for r in rows]
+
+
+async def delete_ad(ad_id):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM ads WHERE id=?", (ad_id,))
+        await db.commit()
+
+
+async def add_women_ad(user_id, user_name, text, phone):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO women_ads (user_id, user_name, text, phone) VALUES (?, ?, ?, ?)",
+            (user_id, user_name, text, phone)
+        )
+        await db.commit()
+
+
+async def get_all_women_ads():
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT id, user_id, user_name, text, phone FROM women_ads")
+        rows = await cursor.fetchall()
+        return [{'id': r[0], 'user_id': r[1], 'user_name': r[2], 'text': r[3], 'phone': r[4]} for r in rows]
+
+
+async def get_user_women_ads(user_id):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("SELECT id, user_id, user_name, text, phone FROM women_ads WHERE user_id=?", (user_id,))
+        rows = await cursor.fetchall()
+        return [{'id': r[0], 'user_id': r[1], 'user_name': r[2], 'text': r[3], 'phone': r[4]} for r in rows]
+
+
+async def delete_women_ad(ad_id):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM women_ads WHERE id=?", (ad_id,))
+        await db.commit()
+
+
+async def add_master(category, full_name, phone, description):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO masters (category, full_name, phone, description) VALUES (?, ?, ?, ?)",
+            (category, full_name, phone, description)
+        )
+        await db.commit()
+
+
+async def get_masters_by_category(category):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT id, category, full_name, phone, description FROM masters WHERE LOWER(category) LIKE ?",
+            (f"%{category.lower()}%",)
+        )
+        rows = await cursor.fetchall()
+        return [{'id': r[0], 'category': r[1], 'full_name': r[2], 'phone': r[3], 'description': r[4]} for r in rows]
+
+
+# ============== KLAVIATURALAR ==============
 
 def main_menu():
     kb = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
@@ -81,6 +218,19 @@ def categories_keyboard():
     )
     return kb
 
+
+# Majburiy obunani tekshiruvchi funksiya
+async def check_sub_channel(user_id):
+    try:
+        member = await bot.get_chat_member(chat_id=CHANNEL_ID, user_id=user_id)
+        if member.status in ['creator', 'administrator', 'member']:
+            return True
+        return False
+    except Exception as e:
+        print(f"Obunani tekshirishda xatolik: {e}")
+        return False
+
+
 class MasterState(StatesGroup):
     category = State()
     full_name = State()
@@ -95,12 +245,18 @@ class WomenAdState(StatesGroup):
     text = State()
     phone = State()
 
+class BroadcastState(StatesGroup):
+    text = State()
+    confirm = State()
+
+
 @dp.message_handler(commands=['start', 'help'], state='*')
 async def send_welcome(message: types.Message, state: FSMContext):
     await state.finish()
     user_id = message.from_user.id
 
-    # Majburiy obunani tekshiramiz
+    await register_user(user_id, message.from_user.full_name, message.from_user.username)
+
     is_subscribed = await check_sub_channel(user_id)
 
     if not is_subscribed:
@@ -116,7 +272,7 @@ async def send_welcome(message: types.Message, state: FSMContext):
 
     await message.answer('Chiroqchi tumanida ish topish yoki ish berish botiga xush kelibsiz! 👋\n\nKerakli bo\'limni tanlang:', reply_markup=main_menu())
 
-# Tekshirish tugmasi bosilganda
+
 @dp.callback_query_handler(text="check_sub")
 async def process_check_sub(callback: types.CallbackQuery):
     user_id = callback.from_user.id
@@ -131,6 +287,7 @@ async def process_check_sub(callback: types.CallbackQuery):
     else:
         await callback.answer("Siz hali kanalga a'zo bo'lmadingiz!", show_alert=True)
 
+
 # --- ADMIN BUYRUG'I ---
 @dp.message_handler(commands=['admin'])
 async def admin_panel(message: types.Message):
@@ -140,17 +297,21 @@ async def admin_panel(message: types.Message):
 
     await message.answer('🛠 <b>Admin panel: Barcha e\'lonlarni boshqarish</b>', parse_mode='HTML')
 
-    if not ADS_DB and not WOMEN_ADS_DB:
+    ads = await get_all_ads()
+    women_ads = await get_all_women_ads()
+
+    if not ads and not women_ads:
         await message.answer('Hozircha botda hech qanday e\'lon mavjud emas.')
         return
 
-    for idx, ad in enumerate(ADS_DB):
-        kb = InlineKeyboardMarkup().add(InlineKeyboardButton('❌ E\'lonni o\'chirish (Admin)', callback_data=f"adm_gen_{idx}"))
-        await message.answer(f"<b>[Umumiy] #{idx+1}</b>\nMuallif: {ad['user_name']}\n{ad['text']}\n📞 {ad['phone']}", reply_markup=kb, parse_mode='HTML')
+    for ad in ads:
+        kb = InlineKeyboardMarkup().add(InlineKeyboardButton('❌ E\'lonni o\'chirish (Admin)', callback_data=f"adm_gen_{ad['id']}"))
+        await message.answer(f"<b>[Umumiy] #{ad['id']}</b>\nMuallif: {ad['user_name']}\n{ad['text']}\n📞 {ad['phone']}", reply_markup=kb, parse_mode='HTML')
 
-    for idx, ad in enumerate(WOMEN_ADS_DB):
-        kb = InlineKeyboardMarkup().add(InlineKeyboardButton('❌ E\'lonni o\'chirish (Admin)', callback_data=f"adm_women_{idx}"))
-        await message.answer(f"<b>[Ayollar] #{idx+1}</b>\nMuallif: {ad['user_name']}\n{ad['text']}\n📞 {ad['phone']}", reply_markup=kb, parse_mode='HTML')
+    for ad in women_ads:
+        kb = InlineKeyboardMarkup().add(InlineKeyboardButton('❌ E\'lonni o\'chirish (Admin)', callback_data=f"adm_women_{ad['id']}"))
+        await message.answer(f"<b>[Ayollar] #{ad['id']}</b>\nMuallif: {ad['user_name']}\n{ad['text']}\n📞 {ad['phone']}", reply_markup=kb, parse_mode='HTML')
+
 
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('adm_'))
 async def admin_delete_callback(callback_query: types.CallbackQuery):
@@ -161,18 +322,72 @@ async def admin_delete_callback(callback_query: types.CallbackQuery):
     await bot.answer_callback_query(callback_query.id)
     parts = callback_query.data.split('_')
     ad_type = parts[1]
-    idx = int(parts[2])
+    ad_id = int(parts[2])
 
     try:
         if ad_type == 'gen':
-            if idx < len(ADS_DB):
-                del ADS_DB[idx]
+            await delete_ad(ad_id)
         elif ad_type == 'women':
-            if idx < len(WOMEN_ADS_DB):
-                del WOMEN_ADS_DB[idx]
+            await delete_women_ad(ad_id)
         await callback_query.message.edit_text('✅ E\'lon admin tomonidan o\'chirildi!')
     except Exception:
         await callback_query.message.edit_text('⚠️ Bu e\'lon allaqachon o\'chirilgan.')
+
+
+# --- BARCHA FOYDALANUVCHILARGA XABAR YUBORISH (faqat admin) ---
+@dp.message_handler(commands=['xabar'])
+async def broadcast_start(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.answer('Sizda bu buyruqdan foydalanish huquqi yo\'q.')
+        return
+    count = await get_users_count()
+    await message.answer(f'👥 Botda jami {count} ta foydalanuvchi ro\'yxatga olingan.\n\nBarchaga yubormoqchi bo\'lgan xabar matnini kiriting:')
+    await BroadcastState.text.set()
+
+@dp.message_handler(state=BroadcastState.text)
+async def broadcast_preview(message: types.Message, state: FSMContext):
+    async with state.proxy() as data:
+        data['text'] = message.text
+
+    kb = InlineKeyboardMarkup(row_width=2)
+    kb.add(
+        InlineKeyboardButton('✅ Ha, yuborish', callback_data='broadcast_confirm'),
+        InlineKeyboardButton('❌ Bekor qilish', callback_data='broadcast_cancel')
+    )
+    await message.answer(f"<b>Xabar shunday ko'rinadi:</b>\n\n{message.text}\n\nYuborishni tasdiqlaysizmi?", reply_markup=kb, parse_mode='HTML')
+    await BroadcastState.confirm.set()
+
+@dp.callback_query_handler(text='broadcast_cancel', state=BroadcastState.confirm)
+async def broadcast_cancel(callback_query: types.CallbackQuery, state: FSMContext):
+    await bot.answer_callback_query(callback_query.id)
+    await callback_query.message.edit_text('❌ Xabar yuborish bekor qilindi.')
+    await state.finish()
+
+@dp.callback_query_handler(text='broadcast_confirm', state=BroadcastState.confirm)
+async def broadcast_confirm(callback_query: types.CallbackQuery, state: FSMContext):
+    await bot.answer_callback_query(callback_query.id)
+    async with state.proxy() as data:
+        text = data['text']
+    await state.finish()
+
+    await callback_query.message.edit_text('⏳ Xabar yuborilmoqda, biroz kuting...')
+
+    user_ids = await get_all_user_ids()
+    success = 0
+    failed = 0
+    for user_id in user_ids:
+        try:
+            await bot.send_message(user_id, text)
+            success += 1
+        except Exception:
+            failed += 1
+        await asyncio.sleep(0.05)  # Telegram cheklovidan chiqib ketmaslik uchun
+
+    await bot.send_message(
+        callback_query.from_user.id,
+        f"✅ Xabar yuborish tugadi!\n\n📨 Yuborildi: {success} ta\n🚫 Yuborilmadi (bloklangan/o'chirilgan): {failed} ta"
+    )
+
 
 @dp.message_handler(text='👨‍💻 Erkaklar online')
 async def men_online_section(message: types.Message):
@@ -219,19 +434,20 @@ async def show_women_section(message: types.Message):
 
 @dp.message_handler(text='🔍 Ish topish')
 async def find_work(message: types.Message):
-    if not ADS_DB:
+    ads = await get_all_ads()
+    if not ads:
         await message.answer('Hozircha umumiy faol e\'lonlar yo\'q.')
     else:
         text = '<b>📋 Mavjud umumiy e\'lonlar va ishlar:</b>\n\n'
-        for idx, ad in enumerate(ADS_DB, 1):
+        for idx, ad in enumerate(ads, 1):
             text += f"{idx}. {ad['text']}\n👤 <b>Muallif:</b> {ad['user_name']}\n📞 <b>Tel:</b> {ad['phone']}\n-----\n"
         await message.answer(text, parse_mode='HTML')
 
 @dp.message_handler(text='🗑 Mening e\'lonlarim')
 async def my_ads(message: types.Message):
     user_id = message.from_user.id
-    user_ads = [ad for ad in ADS_DB if ad['user_id'] == user_id]
-    user_women_ads = [ad for ad in WOMEN_ADS_DB if ad['user_id'] == user_id]
+    user_ads = await get_user_ads(user_id)
+    user_women_ads = await get_user_women_ads(user_id)
 
     if not user_ads and not user_women_ads:
         await message.answer('Sizda hozircha faol e\'lonlar yo\'q.')
@@ -240,11 +456,11 @@ async def my_ads(message: types.Message):
     await message.answer('<b>Sizning faol e\'lonlaringiz:</b> (O\'chirish uchun tegishli tugmani bosing)', parse_mode='HTML')
 
     for idx, ad in enumerate(user_ads, 1):
-        kb = InlineKeyboardMarkup().add(InlineKeyboardButton('❌ E\'lonni o\'chirish', callback_data=f"del_gen_{ADS_DB.index(ad)}"))
+        kb = InlineKeyboardMarkup().add(InlineKeyboardButton('❌ E\'lonni o\'chirish', callback_data=f"del_gen_{ad['id']}"))
         await message.answer(f"<b>Umumiy e'lon #{idx}:</b>\n{ad['text']}\n📞 {ad['phone']}", reply_markup=kb, parse_mode='HTML')
 
     for idx, ad in enumerate(user_women_ads, 1):
-        kb = InlineKeyboardMarkup().add(InlineKeyboardButton('❌ E\'lonni o\'chirish', callback_data=f"del_women_{WOMEN_ADS_DB.index(ad)}"))
+        kb = InlineKeyboardMarkup().add(InlineKeyboardButton('❌ E\'lonni o\'chirish', callback_data=f"del_women_{ad['id']}"))
         await message.answer(f"<b>Ayollar bo'limi e'lon #{idx}:</b>\n{ad['text']}\n📞 {ad['phone']}", reply_markup=kb, parse_mode='HTML')
 
 @dp.callback_query_handler(lambda c: c.data and c.data.startswith('del_'))
@@ -252,15 +468,13 @@ async def delete_ad_callback(callback_query: types.CallbackQuery):
     await bot.answer_callback_query(callback_query.id)
     parts = callback_query.data.split('_')
     ad_type = parts[1]
-    idx = int(parts[2])
+    ad_id = int(parts[2])
 
     try:
         if ad_type == 'gen':
-            if idx < len(ADS_DB):
-                del ADS_DB[idx]
+            await delete_ad(ad_id)
         elif ad_type == 'women':
-            if idx < len(WOMEN_ADS_DB):
-                del WOMEN_ADS_DB[idx]
+            await delete_women_ad(ad_id)
         await callback_query.message.edit_text('✅ E\'lon muvaffaqiyatli o\'chirildi!')
     except Exception:
         await callback_query.message.edit_text('⚠️ Bu e\'lon allaqachon o\'chirilgan.')
@@ -280,20 +494,16 @@ async def process_ad_text(message: types.Message, state: FSMContext):
 @dp.message_handler(state=AdState.phone)
 async def process_ad_phone(message: types.Message, state: FSMContext):
     async with state.proxy() as data:
-        new_ad = {
-            'user_id': message.from_user.id,
-            'user_name': message.from_user.full_name,
-            'text': data['text'],
-            'phone': message.text
-        }
-        ADS_DB.append(new_ad)
+        ad_text = data['text']
 
-        ad_message = f"<b>📢 ERKAKLAR BO'LIMI - YANGI E'LON!</b>\n\n{data['text']}\n👤 <b>Muallif:</b> {message.from_user.full_name}\n📞 <b>Tel:</b> {message.text}"
-        for user_id in MEN_ONLINE_DB:
-            try:
-                await bot.send_message(user_id, ad_message, parse_mode='HTML')
-            except Exception:
-                pass
+    await add_ad(message.from_user.id, message.from_user.full_name, ad_text, message.text)
+
+    ad_message = f"<b>📢 ERKAKLAR BO'LIMI - YANGI E'LON!</b>\n\n{ad_text}\n👤 <b>Muallif:</b> {message.from_user.full_name}\n📞 <b>Tel:</b> {message.text}"
+    for user_id in MEN_ONLINE_DB:
+        try:
+            await bot.send_message(user_id, ad_message, parse_mode='HTML')
+        except Exception:
+            pass
 
     await message.answer('✅ E\'loningiz qabul qilindi va tarqatildi!', reply_markup=main_menu())
     await state.finish()
@@ -301,11 +511,12 @@ async def process_ad_phone(message: types.Message, state: FSMContext):
 @dp.callback_query_handler(text='women_find')
 async def process_women_find(callback_query: types.CallbackQuery):
     await bot.answer_callback_query(callback_query.id)
-    if not WOMEN_ADS_DB:
+    women_ads = await get_all_women_ads()
+    if not women_ads:
         text = "<b>Hozircha Ayollar bo'limida e'lonlar yo'q.</b>"
     else:
         text = "<b>🧵 Ayollar bo'limidagi mavjud e'lonlar:</b>\n\n"
-        for idx, ad in enumerate(WOMEN_ADS_DB, 1):
+        for idx, ad in enumerate(women_ads, 1):
             text += f"{idx}. {ad['text']}\n👤 <b>Muallif:</b> {ad['user_name']}\n📞 <b>Tel:</b> {ad['phone']}\n-----\n"
     await bot.send_message(callback_query.from_user.id, text, parse_mode='HTML')
 
@@ -325,20 +536,16 @@ async def process_women_ad_text(message: types.Message, state: FSMContext):
 @dp.message_handler(state=WomenAdState.phone)
 async def process_women_ad_phone(message: types.Message, state: FSMContext):
     async with state.proxy() as data:
-        new_ad = {
-            'user_id': message.from_user.id,
-            'user_name': message.from_user.full_name,
-            'text': data['text'],
-            'phone': message.text
-        }
-        WOMEN_ADS_DB.append(new_ad)
+        ad_text = data['text']
 
-        ad_message = f"<b>🧵 AYOLLAR ONLINE - YANGI E'LON!</b>\n\n{data['text']}\n👤 <b>Muallif:</b> {message.from_user.full_name}\n📞 <b>Tel:</b> {message.text}"
-        for user_id in WOMEN_ONLINE_DB:
-            try:
-                await bot.send_message(user_id, ad_message, parse_mode='HTML')
-            except Exception:
-                pass
+    await add_women_ad(message.from_user.id, message.from_user.full_name, ad_text, message.text)
+
+    ad_message = f"<b>🧵 AYOLLAR ONLINE - YANGI E'LON!</b>\n\n{ad_text}\n👤 <b>Muallif:</b> {message.from_user.full_name}\n📞 <b>Tel:</b> {message.text}"
+    for user_id in WOMEN_ONLINE_DB:
+        try:
+            await bot.send_message(user_id, ad_message, parse_mode='HTML')
+        except Exception:
+            pass
 
     await message.answer('✅ E\'loningiz Ayollar bo\'limiga qo\'shildi!', reply_markup=main_menu())
     await state.finish()
@@ -353,7 +560,7 @@ async def process_master_category(callback_query: types.CallbackQuery):
     cat_code = callback_query.data.split('_')[1]
     cat_names = {'build': 'Qurilish ustalari', 'electric': 'Elektrik va Santexnik', 'welder': 'Duradgor va Payvandchi', 'finish': 'Malyar va Oboichi'}
     target_cat = cat_names.get(cat_code, '')
-    filtered = [m for m in MASTERS_DB if target_cat.lower() in m['category'].lower()]
+    filtered = await get_masters_by_category(target_cat)
     if not filtered:
         text = f"<b>{target_cat} yo'nalishi bo'yicha hozircha ustalar yo'q.</b>"
     else:
@@ -394,14 +601,18 @@ async def process_phone(message: types.Message, state: FSMContext):
 @dp.message_handler(state=MasterState.description)
 async def process_description(message: types.Message, state: FSMContext):
     async with state.proxy() as data:
-        MASTERS_DB.append({
-            'category': data['category'],
-            'full_name': data['full_name'],
-            'phone': data['phone'],
-            'description': message.text
-        })
+        category = data['category']
+        full_name = data['full_name']
+        phone = data['phone']
+
+    await add_master(category, full_name, phone, message.text)
     await message.answer('✅ Muvaffaqiyatli saqlandi!', reply_markup=main_menu())
     await state.finish()
 
+
+async def on_startup(dispatcher):
+    await init_db()
+
+
 if __name__ == '__main__':
-    executor.start_polling(dp, skip_updates=True)
+    executor.start_polling(dp, skip_updates=True, on_startup=on_startup)
